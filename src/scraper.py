@@ -1,6 +1,6 @@
-﻿"""
+"""
 Romania Parliament Members Scraper
-Scrapes deputy information from cdep.ro
+Scrapes deputy and senator information from cdep.ro and senat.ro
 """
 
 import requests
@@ -9,6 +9,8 @@ import json
 import re
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, 'src')
 import config
 
 class ParliamentScraper:
@@ -17,126 +19,185 @@ class ParliamentScraper:
         self.session.headers.update(config.HEADERS)
         self.members = []
         
-    def scrape_deputies_list(self):
-        '''Scrape main list of deputies'''
-        print('Scraping deputies list...')
+    def scrape_deputies(self):
+        '''Scrape deputies from Camera Deputaților'''
+        print('=' * 60)
+        print('Scraping deputies from Camera Deputaților...')
+        print('=' * 60)
         
         try:
-            response = self.session.get(config.DEPUTIES_LIST_URL, timeout=10)
+            url = 'https://www.cdep.ro/pls/parlam/structura2015.de?leg=2024'
+            response = self.session.get(url, timeout=15)
             response.raise_for_status()
             response.encoding = 'utf-8'
             
             soup = BeautifulSoup(response.text, 'html5lib')
             
-            # Find the table with deputies (adjust selector based on actual structure)
-            # This is a placeholder - we'll need to adjust after seeing the actual HTML
-            table = soup.find('table')
+            # Find all deputy links - they have mp? in the URL
+            deputy_links = soup.find_all('a', href=re.compile(r'structura2015\.mp\?'))
             
-            if not table:
-                print('Could not find deputies table')
-                return []
+            print(f'Found {len(deputy_links)} deputy links')
             
-            rows = table.find_all('tr')[1:]  # Skip header row
+            for link in deputy_links:
+                name = link.text.strip()
+                if name:  # Skip empty links
+                    profile_url = 'https://www.cdep.ro/pls/parlam/' + link.get('href', '')
+                    
+                    # Try to get more info from the row
+                    row = link.find_parent('tr')
+                    county = ''
+                    party = ''
+                    
+                    if row:
+                        cells = row.find_all('td')
+                        if len(cells) >= 2:
+                            county = cells[1].text.strip()
+                        if len(cells) >= 3:
+                            party = cells[2].text.strip()
+                    
+                    member = {
+                        'name': name,
+                        'county': county,
+                        'party': party,
+                        'chamber': 'Camera Deputaților',
+                        'profile_url': profile_url,
+                        'email': None,
+                        'phone': None,
+                        'cv_url': None
+                    }
+                    
+                    self.members.append(member)
+                    print(f'  Added: {name}')
             
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 3:
-                    member = self.parse_deputy_row(cols, row)
-                    if member:
-                        self.members.append(member)
-                        print(f'Added: {member[\"name\"]} from {member[\"county\"]}')
-            
-            print(f'Total deputies scraped: {len(self.members)}')
-            return self.members
-            
-        except requests.RequestException as e:
-            print(f'Error scraping deputies list: {e}')
-            return []
-    
-    def parse_deputy_row(self, cols, row):
-        '''Parse individual deputy row'''
-        try:
-            # Extract name - usually first column with a link
-            name_cell = cols[0]
-            name_link = name_cell.find('a')
-            
-            if name_link:
-                name = name_link.text.strip()
-                profile_url = config.DEPUTIES_BASE_URL + name_link.get('href', '')
-            else:
-                name = name_cell.text.strip()
-                profile_url = None
-            
-            # Extract county - usually second column
-            county = cols[1].text.strip() if len(cols) > 1 else ''
-            
-            # Extract party - usually third column
-            party = cols[2].text.strip() if len(cols) > 2 else ''
-            
-            member = {
-                'name': name,
-                'county': county,
-                'party': party,
-                'chamber': 'Camera Deputaților',
-                'profile_url': profile_url,
-                'email': None,
-                'phone': None,
-                'cv_url': None
-            }
-            
-            return member
+            print(f'\nTotal deputies: {len([m for m in self.members if m["chamber"] == "Camera Deputaților"])}')
+            return True
             
         except Exception as e:
-            print(f'Error parsing row: {e}')
-            return None
+            print(f'Error scraping deputies: {e}')
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def scrape_senators(self):
+        '''Scrape senators from Senat'''
+        print('\n' + '=' * 60)
+        print('Scraping senators from Senat...')
+        print('=' * 60)
+        
+        try:
+            url = 'https://www.senat.ro/FisaSenatori.aspx'
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            response.encoding = 'utf-8'
+            
+            soup = BeautifulSoup(response.text, 'html5lib')
+            
+            # Find all senator links - they have FisaSenator.aspx in the URL
+            senator_links = soup.find_all('a', href=re.compile(r'FisaSenator\.aspx\?ParlamentarID='))
+            
+            print(f'Found {len(senator_links)} senator links')
+            
+            for link in senator_links:
+                name = link.text.strip()
+                if name:  # Skip empty links
+                    profile_url = 'https://www.senat.ro/' + link.get('href', '')
+                    
+                    # Try to extract info from the surrounding text
+                    parent = link.find_parent()
+                    text = parent.get_text() if parent else ''
+                    
+                    # Extract county and party from text
+                    county = ''
+                    party = ''
+                    
+                    # Look for "Circumscripția electorală" pattern
+                    county_match = re.search(r'Circumscripţia electorală nr\.(\d+)\s+([^\n]+)', text)
+                    if county_match:
+                        county_num = county_match.group(1)
+                        county_name = county_match.group(2).strip()
+                        county = f'{county_name}'
+                    
+                    # Look for "Grupul parlamentar" pattern
+                    party_match = re.search(r'Grupul parlamentar\s+([^\n]+)', text)
+                    if party_match:
+                        party = party_match.group(1).strip()
+                    
+                    member = {
+                        'name': name,
+                        'county': county,
+                        'party': party,
+                        'chamber': 'Senat',
+                        'profile_url': profile_url,
+                        'email': None,
+                        'phone': None,
+                        'cv_url': None
+                    }
+                    
+                    self.members.append(member)
+                    print(f'  Added: {name}')
+            
+            print(f'\nTotal senators: {len([m for m in self.members if m["chamber"] == "Senat"])}')
+            return True
+            
+        except Exception as e:
+            print(f'Error scraping senators: {e}')
+            import traceback
+            traceback.print_exc()
+            return False
     
     def scrape_member_details(self, member):
-        '''Scrape individual member profile for CV and contact info'''
+        '''Scrape individual member profile for email and CV'''
         if not member.get('profile_url'):
             return member
         
         try:
-            print(f'Scraping details for {member[\"name\"]}...')
+            print(f'  Scraping details for {member["name"]}...', end=' ')
             response = self.session.get(member['profile_url'], timeout=10)
             response.raise_for_status()
             response.encoding = 'utf-8'
             
             soup = BeautifulSoup(response.text, 'html5lib')
-            
-            # Look for CV link
-            cv_links = soup.find_all('a', href=re.compile(r'\.pdf|\.doc|\.docx', re.I))
-            if cv_links:
-                cv_url = cv_links[0].get('href')
-                if not cv_url.startswith('http'):
-                    cv_url = config.DEPUTIES_BASE_URL + cv_url
-                member['cv_url'] = cv_url
+            page_text = soup.get_text()
             
             # Look for email in page text
-            page_text = soup.get_text()
             emails = re.findall(config.EMAIL_PATTERN, page_text)
             if emails:
-                member['email'] = emails[0]
+                # Filter out common false positives
+                valid_emails = [e for e in emails if '@cdep.ro' in e or '@senat.ro' in e or '@parlament.ro' in e]
+                if valid_emails:
+                    member['email'] = valid_emails[0]
+                    print(f'Email: {member["email"]}', end=' ')
             
             # Look for phone numbers
             for pattern in config.PHONE_PATTERNS:
                 phones = re.findall(pattern, page_text)
                 if phones:
-                    member['phone'] = phones[0]
+                    member['phone'] = phones[0] if isinstance(phones[0], str) else phones[0][0]
+                    print(f'Phone: {member["phone"]}', end=' ')
                     break
             
-            time.sleep(1)  # Be polite, don't hammer the server
+            # Look for CV link
+            cv_links = soup.find_all('a', href=re.compile(r'\.(pdf|doc|docx)$', re.I))
+            if not cv_links:
+                # Try finding CV in text
+                cv_links = soup.find_all('a', string=re.compile(r'CV|curriculum', re.I))
+            
+            if cv_links:
+                cv_href = cv_links[0].get('href', '')
+                if cv_href:
+                    if not cv_href.startswith('http'):
+                        base_url = 'https://www.cdep.ro/pls/parlam/' if 'cdep.ro' in member['profile_url'] else 'https://www.senat.ro/'
+                        cv_href = base_url + cv_href
+                    member['cv_url'] = cv_href
+                    print(f'CV found', end=' ')
+            
+            print('✓')
+            time.sleep(0.5)  # Be polite to the server
             
         except Exception as e:
-            print(f'Error scraping details for {member[\"name\"]}: {e}')
+            print(f'Error: {e}')
         
         return member
-    
-    def extract_email_from_cv(self, cv_url):
-        '''Download and extract email from CV PDF/DOC'''
-        # TODO: Implement CV downloading and parsing
-        # This would use PyPDF2 or pdfplumber for PDFs
-        # and python-docx for Word documents
-        pass
     
     def save_to_json(self, filename=None):
         '''Save scraped data to JSON file'''
@@ -149,36 +210,51 @@ class ParliamentScraper:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.members, f, ensure_ascii=False, indent=2)
         
+        print(f'\n' + '=' * 60)
         print(f'Data saved to {filename}')
         print(f'Total members: {len(self.members)}')
+        deputies = len([m for m in self.members if m["chamber"] == "Camera Deputaților"])
+        senators = len([m for m in self.members if m["chamber"] == "Senat"])
+        print(f'  - Deputies: {deputies}')
+        print(f'  - Senators: {senators}')
+        with_email = len([m for m in self.members if m.get("email")])
+        print(f'  - With email: {with_email}')
+        print('=' * 60)
     
-    def run(self, scrape_details=False):
+    def run(self, scrape_details=False, chamber='both'):
         '''Main scraper execution'''
-        print('=== Romania Parliament Scraper ===')
-        print()
+        print('\n' + '=' * 60)
+        print('ROMANIA PARLIAMENT SCRAPER')
+        print('=' * 60 + '\n')
         
-        # Scrape main list
-        self.scrape_deputies_list()
+        # Scrape deputies
+        if chamber in ['both', 'deputies']:
+            self.scrape_deputies()
+        
+        # Scrape senators
+        if chamber in ['both', 'senators']:
+            self.scrape_senators()
         
         # Optionally scrape individual profiles
         if scrape_details and self.members:
-            print()
+            print('\n' + '=' * 60)
             print('Scraping individual member details...')
+            print('=' * 60)
             for i, member in enumerate(self.members):
                 print(f'[{i+1}/{len(self.members)}]', end=' ')
                 self.scrape_member_details(member)
         
         # Save results
         self.save_to_json()
-        print()
-        print('=== Scraping Complete ===')
+        print('\n✓ Scraping Complete!\n')
 
 def main():
     scraper = ParliamentScraper()
     
-    # Run scraper (set scrape_details=True to get emails/phones)
-    # Start with False to test basic scraping first
-    scraper.run(scrape_details=False)
+    # Run scraper
+    # Set scrape_details=True to get emails/phones from individual pages
+    # Set chamber to 'deputies', 'senators', or 'both'
+    scraper.run(scrape_details=False, chamber='both')
 
-if __name__ == '__main__':
+if __name__ == '____main__':
     main()
